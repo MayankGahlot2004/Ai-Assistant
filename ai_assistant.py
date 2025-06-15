@@ -6,6 +6,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.prompts import PromptTemplate
 import fitz  # PyMuPDF
 import os
+from fpdf import FPDF  # ✅ For PDF export
 
 # Replace with your Groq API key
 GROQ_API_KEY = "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"  # 🔐 Use your actual key securely
@@ -42,14 +43,12 @@ Question: {question}
 Answer:"""
 )
 
-
 # Extract full text from PDF
 def extract_text_from_pdf(pdf_path):
     doc = fitz.open(pdf_path)
     text = " ".join([page.get_text() for page in doc])
     print(f"[DEBUG] Extracted PDF text length: {len(text)}")
     return text
-
 
 # Split into manageable chunks for embedding
 def split_text(text):
@@ -58,11 +57,9 @@ def split_text(text):
     print(f"[DEBUG] Number of chunks created: {len(chunks)}")
     return chunks
 
-
 # Create or load FAISS vector store
 def create_vectorstore(chunks, embeddings):
     return FAISS.from_documents(chunks, embeddings)
-
 
 # Set up RetrievalQA chain
 def setup_pdf_qa_chain(vstore, llm):
@@ -74,11 +71,28 @@ def setup_pdf_qa_chain(vstore, llm):
         chain_type_kwargs={"prompt": custom_pdf_prompt}
     )
 
-
 # Set up fallback chain using full text
 def setup_fallback_chain(llm, pdf_text):
     chain = LLMChain(llm=llm, prompt=fallback_prompt)
     return chain, pdf_text
+
+# Save conversation to PDF
+def save_conversation_to_pdf(conversation, filename="chat_log.pdf"):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    # Add Unicode font (path must be correct!)
+    font_path = "C:\\Users\\mayan\\OneDrive\\Desktop\\Assistant\\DejaVuSans.ttf"
+    pdf.add_font("DejaVu", "", font_path)
+    pdf.set_font("DejaVu", size=12)
+
+    for entry in conversation:
+        pdf.multi_cell(0, 10, entry)
+        pdf.ln()
+
+    pdf.output(filename)
+    print(f"✅ Conversation saved to {filename}")
 
 
 def main():
@@ -109,11 +123,23 @@ def main():
     print("\n🚀 Groq-based PDF Assistant ready. Ask questions (type 'exit' to quit).\n")
 
     # Step 4: User loop
+        # Step 4: User loop
+    conversation_log = []  # Collect all Q&A pairs
+
     while True:
         query = input("You: ")
         if query.strip().lower() in ["exit", "quit"]:
+            save_pdf = input("\n📝 Do you want to save this conversation as a PDF? (yes/no): ").strip().lower()
+            if save_pdf in ["yes", "y"]:
+                filename = input("📁 Enter filename to save as (without .pdf): ").strip()
+                if not filename:
+                    filename = "chat_log"
+                save_conversation_to_pdf(conversation_log, f"{filename}.pdf")
             print("👋 Exiting. Goodbye!")
             break
+
+        # Store user question
+        conversation_log.append(f"You: {query}")
 
         # Try PDF-based QA first
         try:
@@ -136,6 +162,12 @@ def main():
                 answer = f"❌ Error from fallback LLM: {str(e)}"
 
         print("Assistant:", answer)
+        conversation_log.append(f"Assistant: {answer}")
+
+
+            # Step 5: Ask to save conversation once at the end
+        
+
 
 
 if __name__ == "__main__":
