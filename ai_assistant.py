@@ -1,77 +1,140 @@
-import os
-import fitz  # PyMuPDF
-#from langchain.document_loaders import TextLoader
+from langchain_groq.chat_models import ChatGroq
+from langchain.chains import RetrievalQA, LLMChain
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.vectorstores import FAISS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.vectorstores import FAISS
-from langchain.embeddings import OllamaEmbeddings
-from langchain.chains import RetrievalQA
-from langchain.llms import Ollama
 from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-import shutil
-import stat
+import fitz  # PyMuPDF
+import os
 
-def remove_readonly(func, path, excinfo):
-    os.chmod(path, stat.S_IWRITE)
-    func(path)
+# Replace with your Groq API key
+GROQ_API_KEY = "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"  # 🔐 Use your actual key securely
 
-shutil.rmtree("faiss_index", onerror=remove_readonly)
+# Load LLaMA3 LLM from Groq
+llm_shared = ChatGroq(
+    api_key=GROQ_API_KEY,
+    model="llama3-8b-8192"
+)
 
-# 1. Load PDF
+# Prompt used with vector-based QA
+custom_pdf_prompt = PromptTemplate(
+    input_variables=["context", "question"],
+    template="""You are a helpful assistant. Use ONLY the information below to answer the question.
+
+PDF Context:
+{context}
+
+Question: {question}
+
+Answer:"""
+)
+
+# Fallback full-text prompt
+fallback_prompt = PromptTemplate(
+    input_variables=["context", "question"],
+    template="""Answer the question using the following full PDF text as context:
+
+Context:
+{context}
+
+Question: {question}
+
+Answer:"""
+)
+
+
+# Extract full text from PDF
 def extract_text_from_pdf(pdf_path):
     doc = fitz.open(pdf_path)
-    return " ".join([page.get_text() for page in doc])
+    text = " ".join([page.get_text() for page in doc])
+    print(f"[DEBUG] Extracted PDF text length: {len(text)}")
+    return text
 
-# 2. Split text into chunks
+
+# Split into manageable chunks for embedding
 def split_text(text):
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    return splitter.create_documents([text])
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    chunks = splitter.create_documents([text])
+    print(f"[DEBUG] Number of chunks created: {len(chunks)}")
+    return chunks
 
-# 3. Embed and store using FAISS
-def create_vectorstore(chunks):
-    embeddings = OllamaEmbeddings(model='gemma:2b')
+
+# Create or load FAISS vector store
+def create_vectorstore(chunks, embeddings):
     return FAISS.from_documents(chunks, embeddings)
 
-# 4. Setup QA chain
-def setup_qa_chain(vstore):
-    retriever = vstore.as_retriever()
-    llm = Ollama(model='gemma:2b')
-    #return RetrievalQA.from_chain_type(
-    #    llm=llm,
-    #    retriever=retriever,
-     #   return_source_documents=False  # ✅ This shows the actual PDF content used
-    #)
-    prompt = PromptTemplate(
-        input_variables=["question"],
-        template="Answer the following question thoughtfully:\n\n{question}"
-    )
-    return LLMChain(llm=llm, prompt=prompt)
 
-# 5. Main logic
+# Set up RetrievalQA chain
+def setup_pdf_qa_chain(vstore, llm):
+    retriever = vstore.as_retriever()
+    return RetrievalQA.from_chain_type(
+        llm=llm,
+        retriever=retriever,
+        return_source_documents=False,
+        chain_type_kwargs={"prompt": custom_pdf_prompt}
+    )
+
+
+# Set up fallback chain using full text
+def setup_fallback_chain(llm, pdf_text):
+    chain = LLMChain(llm=llm, prompt=fallback_prompt)
+    return chain, pdf_text
+
+
 def main():
-    pdf_path = "C:\\Users\\mayan\\OneDrive\\Desktop\\Assistant\\assis_trial.pdf"  # Replace with your PDF file path
+    pdf_path = "C:\\Users\\mayan\\OneDrive\\Desktop\\Assistant\\CSE332.pdf"
+    if not os.path.exists(pdf_path):
+        print(f"❌ PDF not found at: {pdf_path}")
+        return
+
+    # Step 1: Extract and embed PDF content
     text = extract_text_from_pdf(pdf_path)
 
-    # Check if FAISS index already exists
+    embeddings = OllamaEmbeddings(model='nomic-embed-text')
+
+    # Step 2: Load or create vector index
     if os.path.exists("faiss_index/index.faiss"):
-        print("🔁 Loading existing FAISS index...")
-        embeddings = OllamaEmbeddings(model='gemma:2b')
+        print("[INFO] Loading existing FAISS index...")
         vstore = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
     else:
-        print("⚙️ Creating FAISS index for the first time...")
+        print("[INFO] Creating new FAISS index from PDF...")
         chunks = split_text(text)
-        vstore = create_vectorstore(chunks)
+        vstore = create_vectorstore(chunks, embeddings)
         vstore.save_local("faiss_index")
 
-    # ✅ Always setup the QA chain after vstore is defined
-    qa = setup_qa_chain()#vstore)
+    # Step 3: Set up both primary and fallback QA chains
+    pdf_qa = setup_pdf_qa_chain(vstore, llm_shared)
+    fallback_qa, full_context = setup_fallback_chain(llm_shared, text)
 
-    print("\n✅ PDF loaded. You can now ask questions. Type 'exit' to quit.\n")
+    print("\n🚀 Groq-based PDF Assistant ready. Ask questions (type 'exit' to quit).\n")
+
+    # Step 4: User loop
     while True:
         query = input("You: ")
-        if query.lower() in ['exit', 'quit']:
+        if query.strip().lower() in ["exit", "quit"]:
+            print("👋 Exiting. Goodbye!")
             break
-        answer = qa.run({"question": query})
+
+        # Try PDF-based QA first
+        try:
+            answer = pdf_qa.invoke({"query": query})["result"]
+        except Exception as e:
+            print("⚠️ Error from PDF QA chain:", e)
+            answer = ""
+
+        # Detect vague/empty answers and fallback
+        vague_phrases = [
+            "no answer found", "not in pdf", "i don't know", "context does not", "no relevant information"
+        ]
+        normalized = answer.strip().lower()
+
+        if not normalized or any(vague in normalized for vague in vague_phrases):
+            print("(⚠️ Fallback: PDF context did not help — using full LLM)")
+            try:
+                answer = fallback_qa.invoke({"context": full_context, "question": query})["text"]
+            except Exception as e:
+                answer = f"❌ Error from fallback LLM: {str(e)}"
+
         print("Assistant:", answer)
 
 
